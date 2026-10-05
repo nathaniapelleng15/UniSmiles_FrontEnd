@@ -1,0 +1,9 @@
+{
+  "name": "Remix: UniSmile Photo Booth Air",
+  "description": "A customizable Photo Booth application with an extensive Admin Control Panel for managing assets and settings.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": []
+}

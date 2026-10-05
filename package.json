@@ -1,0 +1,33 @@
+{
+  "name": "unismilephotobooth-air",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3000",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test services/*.test.ts services/*.test.js electron/*.test.cjs",
+    "desktop": "electron electron/main.cjs",
+    "pack": "electron-builder --config electron-builder.config.cjs --dir",
+    "dist:mac": "electron-builder --config electron-builder.config.cjs --mac",
+    "dist:win": "electron-builder --config electron-builder.config.cjs --win"
+  },
+  "dependencies": {
+    "@mmote/niimbluelib": "^0.47.0",
+    "@stoprocent/noble": "^2.8.0",
+    "axios": "^1.18.1",
+    "lucide-react": "^0.559.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  },
+  "main": "electron/main.cjs"
+}

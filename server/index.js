@@ -1,0 +1,496 @@
+import express    from 'express';
+import cors       from 'cors';
+import multer     from 'multer';
+import path       from 'path';
+import fs         from 'fs';
+import { fileURLToPath } from 'url';
+import dotenv     from 'dotenv';
+import { sendEmail, prepareEmailParts, EmailError, getEmailConfig } from './emailService.js';
+import pool, { testConnection } from './db.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, '.env') });
+
+const app  = express();
+const PORT = process.env.PORT || 3001;
+const configuredBaseUrl = (process.env.PUBLIC_BASE_URL || process.env.BASE_URL || '').trim().replace(/\/+$/, '');
+const railwayDomain = (process.env.RAILWAY_PUBLIC_DOMAIN || '').trim().replace(/\/+$/, '');
+const isProduction = process.env.NODE_ENV === 'production';
+const isRailway = Boolean(railwayDomain || process.env.RAILWAY_ENVIRONMENT);
+const hasUsableBaseUrl = configuredBaseUrl
+  && !/example\.com|\/download(?:\/|$)/i.test(configuredBaseUrl)
+  && !(isProduction && /localhost|127\.0\.0\.1/i.test(configuredBaseUrl));
+const BASE_URL = hasUsableBaseUrl
+  ? configuredBaseUrl
+  : railwayDomain
+    ? `https://${railwayDomain.replace(/^https?:\/\//i, '')}`
+    : `http://localhost:${PORT}`;
+
+// ─── Konfigurasi ─────────────────────────────────────────────────────────────
+const KI            = process.env.KIOSK_API_KEY || '';
+const ALLOWED_ORIGIN = (process.env.ALLOWED_ORIGIN || '*').trim();
+
+// ─── Folder upload ──────────────────────────────────────────────────────────
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+// ─── Middleware ───────────────────────────────────────────────────────────────
+app.use(cors({
+  origin: ALLOWED_ORIGIN === '*' ? true : ALLOWED_ORIGIN,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-api-key', 'Authorization'],
+}));
+app.use(express.json({ limit: '50mb' }));
+app.use('/uploads', express.static(UPLOAD_DIR));
+
+// ─── Multer config ───────────────────────────────────────────────────────────
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  filename: (_req, file, cb) => {
+    const safeName = path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, safeName);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 30 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/png', 'image/jpeg', 'image/jpg'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Hanya file PNG/JPG yang diperbolehkan'));
+  },
+});
+
+// ─── Auth Middleware ─────────────────────────────────────────────────────────
+const authenticateKiosk = (_req, res, next) => {
+  if (!KI) return next();
+  const provided = (_req.headers['x-api-key'] || '').toString().trim();
+  if (provided && provided === KI) return next();
+  return res.status(401).json({ success: false, message: 'Unauthorized: API Key tidak valid' });
+};
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const toApiResponse = (data = null, message = 'OK') => ({ success: true, message, data });
+
+const getSessionId = (sessionCode) => {
+  if (!sessionCode) return null;
+  const s = sessionCode.toString().trim();
+  return s.length > 0 ? s : null;
+};
+
+const getPublicPhotoUrl = (filename) => `${BASE_URL}/uploads/${encodeURIComponent(path.basename(filename))}`;
+
+const isLegacyDownloadUrl = (value) => /example\.com|\/download(?:\/|$)/i.test(String(value || ''));
+
+const getLatestPhotoUrl = async (sessionCode) => {
+  const id = getSessionId(sessionCode);
+  if (!id) return null;
+
+  const [photos] = await pool.execute(
+    `SELECT filename, url FROM photos
+     WHERE session_id = ?
+     ORDER BY CASE WHEN filename LIKE '%_frame.%' THEN 0 ELSE 1 END, id DESC
+     LIMIT 1`,
+    [id]
+  );
+  const photo = photos[0];
+  if (!photo) return null;
+  if (photo.filename) return getPublicPhotoUrl(photo.filename);
+  return photo.url && !isLegacyDownloadUrl(photo.url) ? photo.url : null;
+};
+
+const getSessionFromLegacyUrl = (value) => {
+  try {
+    const pathname = new URL(value).pathname.replace(/\/+$/, '');
+    const match = pathname.match(/\/download\/([^/]+)$/i);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch (_) {
+    return null;
+  }
+};
+
+const ensureSession = async (sessionCode) => {
+  const id = getSessionId(sessionCode);
+  if (!id) return null;
+  await pool.execute(
+    `INSERT IGNORE INTO sessions (id, session_code, started_at, status)
+     VALUES (?, ?, CURRENT_TIMESTAMP, 'active')`,
+    [id, id]
+  );
+  return id;
+};
+
+// ─── Health Check ────────────────────────────────────────────────────────────
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', server: 'UniSmile Photo Server', time: new Date().toISOString() });
+});
+
+// Compatibility for QR/email links generated by the old /download/:session route.
+app.get('/download/:sessionCode', async (req, res) => {
+  try {
+    const photoUrl = await getLatestPhotoUrl(req.params.sessionCode);
+    if (!photoUrl) return res.status(404).send('Foto untuk sesi ini tidak ditemukan.');
+    return res.redirect(302, photoUrl);
+  } catch (err) {
+    console.error('Error redirect download lama:', err.message);
+    return res.status(500).send('Gagal membuka foto.');
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// NEW v1 KIOSK API — matches current frontend apiService.ts
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── POST /api/v1/kiosk/sessions/start ────────────────────────────────────────
+app.post('/api/v1/kiosk/sessions/start', authenticateKiosk, async (req, res) => {
+  try {
+    const frameTemplateId = req.body?.frame_template_id ?? null;
+    const sessionCode = `SES-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+
+    await ensureSession(sessionCode);
+
+    if (frameTemplateId) {
+      await pool.execute(
+        `UPDATE sessions SET frame_template_id = ? WHERE id = ?`,
+        [frameTemplateId, sessionCode]
+      );
+    }
+
+    console.log(`🎬 Sesi dimulai: ${sessionCode}`);
+    res.status(201).json({ success: true, session_code: sessionCode });
+  } catch (err) {
+    console.error('Error start session:', err);
+    res.status(500).json({ success: false, message: 'Gagal memulai sesi' });
+  }
+});
+
+// ── PUT /api/v1/kiosk/sessions/:session_code/complete ─────────────────────────
+app.put('/api/v1/kiosk/sessions/:session_code/complete', authenticateKiosk, async (req, res) => {
+  try {
+    const sessionCode = getSessionId(req.params.session_code);
+    if (!sessionCode) return res.status(400).json({ success: false, message: 'Session code tidak valid' });
+
+    await ensureSession(sessionCode);
+    await pool.execute(`UPDATE sessions SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE id = ?`, [sessionCode]);
+
+    console.log(`✅ Sesi ${sessionCode} selesai`);
+    res.json(toApiResponse(null, 'Sesi selesai'));
+  } catch (err) {
+    console.error('Error complete session:', err);
+    res.status(500).json({ success: false, message: 'Gagal menyelesaikan sesi' });
+  }
+});
+
+// ── POST /api/v1/kiosk/sessions/:session_code/photos ──────────────────────────
+app.post('/api/v1/kiosk/sessions/:session_code/photos', authenticateKiosk, upload.single('photo'), async (req, res) => {
+  try {
+    const sessionCode = getSessionId(req.params.session_code || req.body?.session_code);
+    if (!sessionCode) return res.status(400).json({ success: false, message: 'Session code tidak valid' });
+    if (!req.file) return res.status(400).json({ success: false, message: 'Tidak ada file foto yang dikirim' });
+
+    await ensureSession(sessionCode);
+
+    const url = getPublicPhotoUrl(req.file.filename);
+    const [result] = await pool.execute(
+      `INSERT INTO photos (filename, url, session_id, file_size, layout_id)
+       VALUES (?, ?, ?, ?, ?)`,
+      [req.file.filename, url, sessionCode, req.file.size, req.body?.layout_id || null]
+    );
+
+    console.log(`📸 Foto terupload: ${url}`);
+    res.status(201).json({
+      success: true,
+      data: {
+        id: result.insertId,
+        filename: req.file.filename,
+        session_id: sessionCode,
+        url,
+      },
+    });
+  } catch (err) {
+    console.error('Error upload photo:', err);
+    res.status(500).json({ success: false, message: 'Gagal upload foto' });
+  }
+});
+
+// ── POST /api/v1/kiosk/sessions/:session_code/payment ─────────────────────────
+app.post('/api/v1/kiosk/sessions/:session_code/payment', authenticateKiosk, async (req, res) => {
+  try {
+    const sessionCode = getSessionId(req.params.session_code);
+    if (!sessionCode) return res.status(400).json({ success: false, message: 'Session code tidak valid' });
+
+    await ensureSession(sessionCode);
+
+    const date = new Date();
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const random = Math.floor(1000 + Math.random() * 9000);
+    const trxCode = `TRX-${yyyy}${mm}${dd}-${random}`;
+
+    const amount = await pool.execute(
+      `SELECT base_price FROM kiosk_settings LIMIT 1`
+    ).then(r => r[0][0]?.base_price || 10000).catch(() => 10000);
+
+    await pool.execute(
+      `INSERT INTO transactions (transaction_code, session_id, layout_id, amount, payment_method, status)
+       VALUES (?, ?, ?, ?, 'QRIS', 'success')`,
+      [trxCode, sessionCode, '1x1', amount]
+    );
+
+    console.log(`💵 Transaksi dicatat: ${trxCode}`);
+    res.status(201).json({ success: true, transaction_code: trxCode });
+  } catch (err) {
+    console.error('Error payment:', err);
+    res.status(500).json({ success: false, message: 'Gagal memproses pembayaran' });
+  }
+});
+
+// ── GET /api/v1/kiosk/payments ────────────────────────────────────────────────
+app.get('/api/v1/kiosk/payments', authenticateKiosk, async (_req, res) => {
+  try {
+    const [rows] = await pool.execute(`SELECT * FROM payments WHERE is_active = 1 LIMIT 1`);
+    if (rows.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error('Error fetch payments:', err);
+    res.json({ success: true, data: [] });
+  }
+});
+
+// ── GET /api/v1/kiosk/templates ───────────────────────────────────────────────
+app.get('/api/v1/kiosk/templates', authenticateKiosk, async (_req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM frame_templates WHERE is_active = 1 ORDER BY id ASC');
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error('Error fetch templates:', err);
+    res.status(500).json({ success: false, message: 'Gagal mengambil templates' });
+  }
+});
+
+// ── GET /api/v1/kiosk/filters ─────────────────────────────────────────────────
+app.get('/api/v1/kiosk/filters', authenticateKiosk, async (_req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM filters WHERE is_active = 1 ORDER BY id ASC');
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error('Error fetch filters:', err);
+    res.status(500).json({ success: false, message: 'Gagal mengambil filters' });
+  }
+});
+
+// ── POST /api/v1/kiosk/sessions/:session_code/send-email ──────────────────────
+app.post('/api/v1/kiosk/sessions/:session_code/send-email', authenticateKiosk, async (req, res) => {
+  const sessionCode = getSessionId(req.params.session_code);
+  const email = (req.body?.email || '').toString().trim();
+
+  if (!sessionCode) return res.status(400).json({ success: false, message: 'Session code tidak valid' });
+  if (!email) return res.status(400).json({ success: false, message: 'Email tidak boleh kosong' });
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ success: false, message: 'Format email tidak valid' });
+  }
+
+  try {
+    let photoUrl = null;
+
+    try {
+      photoUrl = await getLatestPhotoUrl(sessionCode);
+    } catch (dbErr) {
+      console.warn('⚠️  Gagal query foto untuk email:', dbErr.message);
+    }
+
+    if (!photoUrl) {
+      return res.status(404).json({ success: false, message: 'Foto untuk sesi ini belum ditemukan.' });
+    }
+
+    const { html, attachments } = prepareEmailParts({ photoUrl });
+
+    const { from } = getEmailConfig();
+
+    const result = await sendEmail({
+      from,
+      to: email,
+      subject: '📸 Foto Kamu dari UniSmile Photo Booth!',
+      html,
+      attachments,
+    });
+
+    const messageId = result.messageId || result.id || 'sent';
+    console.log(`📧 Email terkirim ke ${email} | ID: ${messageId}`);
+
+    try {
+      await pool.execute(
+        `UPDATE photos SET email_sent_to = ?, email_sent_at = CURRENT_TIMESTAMP WHERE session_id = ? ORDER BY id DESC LIMIT 1`,
+        [email, sessionCode]
+      );
+    } catch (dbErr) {
+      console.warn('⚠️  Gagal update DB email_sent:', dbErr.message);
+    }
+
+    res.json({ success: true, message: `Email berhasil dikirim ke ${email}` });
+  } catch (err) {
+    console.error('❌ Gagal kirim email:', err.message);
+
+    let errorMsg = 'Gagal mengirim email. Coba lagi.';
+    if (err instanceof EmailError) {
+      if (err.code === 'EAUTH') {
+        errorMsg = 'Autentikasi email gagal. Periksa App Password Gmail atau konfigurasi email.';
+      } else if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+        errorMsg = 'Tidak dapat terhubung ke server email. Jika menggunakan hosting, ubah EMAIL_PROVIDER menjadi gmail-api atau resend di .env';
+      } else if (err.code === 'E_CONFIG') {
+        errorMsg = 'Konfigurasi email belum lengkap. Isi SMTP_USER dan SMTP_PASS di environment server, lalu restart server.';
+      }
+    }
+
+    res.status(500).json({ success: false, message: errorMsg, detail: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// OLD API (backward compatibility)
+// ══════════════════════════════════════════════════════════════════════════════
+
+app.post('/api/photos/upload', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang dikirim' });
+  const filename = req.file.filename;
+  const sessionId = req.body.session_id || filename.replace(/\.(png|jpg)$/, '');
+  await ensureSession(sessionId);
+  const url = getPublicPhotoUrl(filename);
+  try {
+    const [result] = await pool.execute(
+      `INSERT INTO photos (filename, url, session_id, file_size, layout_id) VALUES (?, ?, ?, ?, ?)`,
+      [filename, url, sessionId, req.file.size, req.body.layout_id || null]
+    );
+    res.json({ success: true, id: result.insertId, filename, url, session_id: sessionId });
+  } catch (err) {
+    try { fs.unlinkSync(path.join(UPLOAD_DIR, filename)); } catch (_) {}
+    res.status(500).json({ error: 'Gagal menyimpan ke database', detail: err.message });
+  }
+});
+
+app.post('/api/transactions', async (req, res) => {
+  const { session_id, layout_id, amount, payment_method = 'QRIS', status = 'success' } = req.body;
+  if (!session_id || !layout_id || amount === undefined) {
+    return res.status(400).json({ error: 'Data session_id, layout_id, dan amount harus diisi' });
+  }
+  const date = new Date();
+  const trxCode = `TRX-${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}-${Math.floor(1000 + Math.random() * 9000)}`;
+  try {
+    await ensureSession(session_id);
+    const [result] = await pool.execute(
+      `INSERT INTO transactions (transaction_code, session_id, layout_id, amount, payment_method, status) VALUES (?, ?, ?, ?, ?, ?)`,
+      [trxCode, session_id, layout_id, Number(amount), payment_method, status]
+    );
+    res.json({ success: true, id: result.insertId, transaction_code: trxCode, session_id, layout_id, amount, payment_method, status, created_at: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: 'Gagal mencatat transaksi ke database', detail: err.message });
+  }
+});
+
+app.get('/api/frames', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM frame_templates ORDER BY id ASC');
+    res.json({ success: true, frames: rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Gagal mengambil data frames', detail: err.message });
+  }
+});
+
+app.get('/api/filters', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM filters ORDER BY id ASC');
+    res.json({ success: true, filters: rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Gagal mengambil data filters', detail: err.message });
+  }
+});
+
+app.post('/api/email/send', async (req, res) => {
+  const { to, photoUrl, photoBase64, sessionId } = req.body;
+  if (!to || (!photoUrl && !photoBase64)) {
+    return res.status(400).json({ error: 'Email dan foto (URL atau gambar) harus diisi' });
+  }
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(to)) return res.status(400).json({ error: 'Format email tidak valid' });
+
+  try {
+    const legacySessionId = isLegacyDownloadUrl(photoUrl) ? getSessionFromLegacyUrl(photoUrl) : null;
+    const resolvedPhotoUrl = isLegacyDownloadUrl(photoUrl)
+      ? await getLatestPhotoUrl(sessionId || legacySessionId)
+      : photoUrl;
+    if (!photoBase64 && !resolvedPhotoUrl) {
+      return res.status(404).json({ error: 'Foto untuk link lama ini tidak ditemukan.' });
+    }
+
+    const { html, attachments } = prepareEmailParts({ photoUrl: resolvedPhotoUrl, photoBase64 });
+
+    const { from } = getEmailConfig();
+
+    const result = await sendEmail({
+      from,
+      to,
+      subject: '📸 Foto Kamu dari UniSmile Photo Booth!',
+      html,
+      attachments,
+    });
+
+    const messageId = result.messageId || result.id || 'sent';
+    console.log(`📧 Email terkirim ke ${to} | ID: ${messageId}`);
+
+    if (sessionId) {
+      try {
+        await pool.execute(`UPDATE photos SET email_sent_to = ?, email_sent_at = CURRENT_TIMESTAMP WHERE session_id = ? ORDER BY id DESC LIMIT 1`, [to, sessionId]);
+      } catch (dbErr) { console.warn('⚠️  Gagal update DB email_sent:', dbErr.message); }
+    }
+
+    res.json({ success: true, message: `Email berhasil dikirim ke ${to}` });
+  } catch (err) {
+    console.error('❌ Gagal kirim email:', err.message);
+
+    let errorMsg = 'Gagal mengirim email. Coba lagi.';
+    if (err instanceof EmailError) {
+      if (err.code === 'EAUTH') {
+        errorMsg = 'Autentikasi email gagal. Periksa App Password Gmail atau konfigurasi email.';
+      } else if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+        errorMsg = 'Tidak dapat terhubung ke server email. Jika menggunakan hosting, ubah EMAIL_PROVIDER menjadi gmail-api atau resend di .env';
+      } else if (err.code === 'E_CONFIG') {
+        errorMsg = 'Konfigurasi email belum lengkap. Isi SMTP_USER dan SMTP_PASS di environment server, lalu restart server.';
+      }
+    }
+
+    res.status(500).json({ error: errorMsg, detail: err.message });
+  }
+});
+
+// ── Global error handler ──────────────────────────────────────────────────────
+app.use((err, _req, res, _next) => {
+  console.error('Server error:', err.message);
+  res.status(500).json({ error: err.message });
+});
+
+// ─── Start Server ─────────────────────────────────────────────────────────────
+const start = async () => {
+  await testConnection();
+  app.listen(PORT, () => {
+    console.log('');
+    console.log('🚀 UniSmile Photo Server berjalan!');
+    console.log(`   URL  : ${BASE_URL}`);
+    console.log(`   Port : ${PORT}`);
+    console.log(`   DB   : ${process.env.DB_NAME}@${process.env.DB_HOST}`);
+    console.log(`   Foto : ${UPLOAD_DIR}`);
+    console.log(`   API  : ${ALLOWED_ORIGIN === '*' ? 'public' : ALLOWED_ORIGIN}`);
+    console.log('');
+  });
+};
+
+start();

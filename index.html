@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UniSmiles Photobooth</title>
+    <link rel="icon" type="image/png" href="/assets/unismile-favicon.png?v=2" />
+    <link rel="apple-touch-icon" href="/assets/unismile-favicon.png?v=2" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- Google Fonts for Frame Editor -->
+    <link href="https://fonts.googleapis.com/css2?family=Abril+Fatface&family=Anton&family=Bangers&family=Dancing+Script&family=Fredoka+One&family=Great+Vibes&family=Lobster&family=Monoton&family=Oswald&family=Pacifico&family=Permanent+Marker&family=Righteous&family=Roboto&family=Sacramento&family=Shadows+Into+Light&family=Satisfy&family=Creepster&family=Gloria+Hallelujah&family=Indie+Flower&family=Orbitron&family=Press+Start+2P&family=Russo+One&family=Special+Elite&family=Ultra&family=Yellowtail&display=swap" rel="stylesheet">
+    
+    <!-- MediaPipe Selfie Segmentation -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
+    
+    <!-- MediaPipe Hands for Gesture Control -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <!-- html2canvas for image generation -->
+    <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+      }
+      /* Custom scrollbar for better aesthetics */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f1f1f1; 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #888; 
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #555; 
+      }
+
+      /* Global Scale (Reset to 1 for full screen size) */
+      #root {
+        width: 100%;
+        height: 100%;
+      }
+      
+      /* ═══════════════════════════════════════════════════
+         AIR GESTURE CURSOR SYSTEM
+         ═══════════════════════════════════════════════════ */
+
+      /* ── Root cursor container ── */
+      .air-cursor {
+        position: fixed;
+        pointer-events: none;
+        z-index: 9999;
+        transform: translate(-50%, -50%);
+        transition: transform 0.08s ease-out;
+      }
+
+      /* ── SVG ring layer (progress) ── */
+      .air-cursor__svg {
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        width: 80px; height: 80px;
+        transition: opacity 0.2s;
+      }
+
+      /* ── Center dot ── */
+      .air-cursor__dot {
+        position: absolute;
+        top: 50%; left: 50%;
+        width: 14px; height: 14px;
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        background: #f43f5e;
+        box-shadow: 0 0 8px rgba(244,63,94,0.9);
+        transition: background 0.15s, transform 0.15s, box-shadow 0.15s;
+      }
+
+      /* ── Outer ring ── */
+      .air-cursor__ring {
+        position: absolute;
+        top: 50%; left: 50%;
+        width: 56px; height: 56px;
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        border: 3px solid rgba(244,63,94,0.6);
+        box-shadow: 0 0 12px rgba(244,63,94,0.4), inset 0 0 8px rgba(244,63,94,0.1);
+        background: rgba(244,63,94,0.08);
+        transition: border-color 0.15s, box-shadow 0.15s, background 0.15s, width 0.15s, height 0.15s;
+      }
+
+      /* ── Gesture icon label ── */
+      .air-cursor__label {
+        position: absolute;
+        top: calc(50% + 34px);
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        white-space: nowrap;
+        padding: 2px 7px;
+        border-radius: 6px;
+        background: rgba(0,0,0,0.55);
+        backdrop-filter: blur(4px);
+        color: #fff;
+        opacity: 0;
+        transition: opacity 0.2s;
+        pointer-events: none;
+      }
+
+      /* ── PINCH state – ring shrinks (mirrors the gesture) ── */
+      .air-cursor.pinch .air-cursor__ring {
+        width: 28px; height: 28px;
+        border-color: #22c55e;
+        box-shadow: 0 0 20px rgba(34,197,94,0.8), inset 0 0 10px rgba(34,197,94,0.3);
+        background: rgba(34,197,94,0.25);
+        animation: pinch-pulse 0.6s infinite ease-in-out;
+      }
+      .air-cursor.pinch .air-cursor__dot {
+        background: #22c55e;
+        transform: translate(-50%,-50%) scale(0.7);
+        box-shadow: 0 0 16px rgba(34,197,94,1);
+      }
+      .air-cursor.pinch .air-cursor__label {
+        opacity: 1;
+        color: #86efac;
+        background: rgba(34,197,94,0.25);
+      }
+
+      /* ── SCROLLING sub-state (pinch + moving) – turns blue ── */
+      .air-cursor.pinch.scrolling .air-cursor__ring {
+        width: 44px; height: 44px;
+        border-color: #38bdf8;
+        box-shadow: 0 0 22px rgba(56,189,248,0.9), inset 0 0 12px rgba(56,189,248,0.3);
+        background: rgba(56,189,248,0.18);
+        animation: scroll-pulse 0.8s infinite ease-in-out;
+      }
+      .air-cursor.pinch.scrolling .air-cursor__dot {
+        background: #38bdf8;
+        transform: translate(-50%,-50%) scale(1.1);
+        box-shadow: 0 0 16px rgba(56,189,248,1);
+      }
+      .air-cursor.pinch.scrolling .air-cursor__label {
+        opacity: 1;
+        color: #7dd3fc;
+        background: rgba(56,189,248,0.22);
+        font-size: 13px;
+      }
+
+      /* ── OPEN HAND state ── */
+      .air-cursor.open-hand .air-cursor__ring {
+        border-color: #f6cd46;
+        box-shadow: 0 0 18px rgba(246,205,70,0.6), inset 0 0 10px rgba(246,205,70,0.15);
+        background: rgba(246,205,70,0.08);
+        animation: air-pulse 1.5s infinite ease-in-out;
+      }
+      .air-cursor.open-hand .air-cursor__dot {
+        background: #f6cd46;
+        box-shadow: 0 0 12px rgba(246,205,70,1);
+      }
+      .air-cursor.open-hand .air-cursor__label {
+        opacity: 1;
+        color: #fef08a;
+      }
+
+      /* ── PINCH CLICK FIRED – bright green burst ── */
+      .air-cursor.hold-fired .air-cursor__ring {
+        animation: pinch-click-burst 0.45s ease-out forwards;
+        border-color: #22c55e;
+      }
+      .air-cursor.hold-fired .air-cursor__dot {
+        background: #fff;
+        transform: translate(-50%,-50%) scale(2.5);
+        opacity: 0;
+        transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+      }
+
+      @keyframes pinch-pulse {
+        0%, 100% { transform: translate(-50%,-50%) scale(1); box-shadow: 0 0 20px rgba(34,197,94,0.8); }
+        50% { transform: translate(-50%,-50%) scale(0.88); box-shadow: 0 0 30px rgba(34,197,94,1); }
+      }
+
+      @keyframes air-pulse {
+        0%, 100% { transform: translate(-50%,-50%) scale(1); opacity: 1; box-shadow: 0 0 12px rgba(246,205,70,0.5); }
+        50% { transform: translate(-50%,-50%) scale(1.12); opacity: 0.85; box-shadow: 0 0 24px rgba(246,205,70,0.8); }
+      }
+
+      @keyframes pinch-click-burst {
+        0%   { transform: translate(-50%,-50%) scale(0.8); opacity: 1; border-color: #22c55e; box-shadow: 0 0 20px rgba(34,197,94,1); }
+        40%  { transform: translate(-50%,-50%) scale(2.5); opacity: 0.9; border-color: #a3e635; box-shadow: 0 0 50px rgba(163,230,53,1); }
+        100% { transform: translate(-50%,-50%) scale(3.5); opacity: 0; }
+      }
+
+      @keyframes air-burst {
+        0%   { transform: translate(-50%,-50%) scale(1); opacity: 1; }
+        60%  { transform: translate(-50%,-50%) scale(2.2); opacity: 0.5; border-color: #f6cd46; box-shadow: 0 0 40px rgba(246,205,70,0.9); }
+        100% { transform: translate(-50%,-50%) scale(2.8); opacity: 0; }
+      }
+
+      @keyframes scroll-pulse {
+        0%, 100% { transform: translate(-50%,-50%) scale(1);    box-shadow: 0 0 20px rgba(56,189,248,0.6); }
+        50%      { transform: translate(-50%,-50%) scale(1.15); box-shadow: 0 0 32px rgba(56,189,248,1);   }
+      }
+
+      /* ── Gesture Toast notifications ── */
+      .gesture-toast {
+        position: fixed;
+        bottom: 80px;
+        left: 50%;
+        transform: translateX(-50%) translateY(20px);
+        background: rgba(0,0,0,0.75);
+        backdrop-filter: blur(12px);
+        color: #fff;
+        padding: 10px 24px;
+        border-radius: 100px;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        pointer-events: none;
+        z-index: 9998;
+        opacity: 0;
+        transition: opacity 0.25s, transform 0.25s;
+        border: 1px solid rgba(255,255,255,0.15);
+        white-space: nowrap;
+      }
+      .gesture-toast.visible {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+
+      /* Animations */
+      @keyframes fade-in {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      .animate-fade-in {
+        animation: fade-in 0.3s ease-out forwards;
+      }
+
+      @keyframes fade-in-up {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .animate-fade-in-up {
+        animation: fade-in-up 0.4s ease-out forwards;
+      }
+
+      @keyframes heartbeat {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+      }
+      .animate-heartbeat {
+        animation: heartbeat 2s infinite ease-in-out;
+      }
+
+      @keyframes animate-fade-in-left {
+        from { opacity: 0; transform: translateX(-30px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+      .animate-fade-in-left { animation: animate-fade-in-left 0.5s ease-out forwards; }
+
+      @keyframes animate-fade-in-right {
+        from { opacity: 0; transform: translateX(30px); }
+        to { opacity: 1; transform: translateX(0); }
+      }
+      .animate-fade-in-right { animation: animate-fade-in-right 0.5s ease-out forwards; }
+
+      @keyframes animate-scale-in {
+        from { opacity: 0; transform: scale(0.9); }
+        to { opacity: 1; transform: scale(1); }
+      }
+      .animate-scale-in { animation: animate-scale-in 0.4s ease-out forwards; }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.559.0",
+    "react": "https://aistudiocdn.com/react@^19.2.1",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-[#0c1633] text-gray-900 antialiased h-screen w-screen overflow-hidden">
+    <div id="root" class="h-full w-full"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>

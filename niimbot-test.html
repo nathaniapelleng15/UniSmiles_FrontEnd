@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Uji Cetak Niimbot B1 Pro</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 24px;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a; color: #e2e8f0;
+    }
+    main { max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: #94a3b8; margin: 0 0 22px; font-size: 13px; }
+    section {
+      background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+      padding: 18px; margin-bottom: 16px;
+    }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+         color: #94a3b8; margin: 0 0 14px; }
+    label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+    input, select {
+      width: 100%; box-sizing: border-box; background: #0f172a; color: #e2e8f0;
+      border: 1px solid #334155; border-radius: 8px; padding: 9px 11px; font: inherit;
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    button {
+      background: #2563eb; color: #fff; border: 0; border-radius: 8px;
+      padding: 10px 16px; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.ghost { background: #334155; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    #log {
+      background: #020617; border: 1px solid #334155; border-radius: 8px;
+      padding: 12px; height: 220px; overflow-y: auto; white-space: pre-wrap;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 14px;
+    }
+    .warn { background: #451a03; border-color: #92400e; color: #fde68a; }
+    .ok { color: #4ade80; }
+    .bad { color: #f87171; }
+    code { background: #020617; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+    .facts { font-size: 13px; color: #cbd5e1; }
+    .facts b { color: #e2e8f0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Uji Cetak — Niimbot B1 Pro</h1>
+  <p class="sub">Halaman uji mandiri. Buka di Chrome/Edge. Web Bluetooth hanya aktif di HTTPS atau <code>localhost</code>.</p>
+
+  <section class="warn">
+    <div class="facts">
+      <b>Batas fisik B1 Pro:</b> kepala cetak <b>576 px</b> = <b>48,8 mm</b> (terverifikasi di kertas oleh penulis driver).<br>
+      Label <b>54 mm</b> = 638 px → kelebihan <b>62 px = 5,3 mm tidak akan tercetak</b>, tanpa pesan error.<br>
+      Karena itu gambar cetak selalu <b>diperkecil agar utuh</b> (tidak ada bagian yang terpotong), bukan dipotong di sisi kanan.
+    </div>
+  </section>
+
+  <section>
+    <h2>1. Nilai dari Pengaturan Admin</h2>
+    <!--
+      Halaman ini TIDAK LAGI menyetel ukuran kertas, kepekatan, atau geser
+      vertikal. Pengaturan itu sekarang ada di Admin (Kiosk Manager -> Printer
+      Configuration -> Photo & Print Calibration), karena nilai yang diatur di
+      sini tidak terbaca oleh photobooth produksi — halaman localhost hanya ada
+      di laptop.
+
+      Nilai di bawah dibaca dari kiosk-agent lewat local bridge. Kalau agent
+      tidak jalan, halaman memakai nilai netral dan mengatakannya terus terang,
+      supaya tidak ada yang mengira sudah memakai setelan produksi.
+    -->
+    <div class="row">
+      <div>
+        <label>Lebar kertas label (mm)</label>
+        <input id="w_mm" type="number" value="54" min="1" step="0.5">
+      </div>
+      <div>
+        <label>Tinggi kertas label (mm)</label>
+        <input id="h_mm" type="number" value="67" min="1" step="0.5">
+      </div>
+    </div>
+    <p class="facts" id="geom">—</p>
+    <p class="facts" id="adminSource" style="margin-top:6px;">Membaca pengaturan dari kiosk-agent…</p>
+  </section>
+
+  <section>
+    <h2>2. Foto</h2>
+    <div class="row">
+      <div>
+        <label>Pilih berkas (dari laptop)</label>
+        <input id="file" type="file" accept="image/*">
+      </div>
+      <div>
+        <label>atau pakai gambar uji bawaan</label>
+        <button class="ghost" id="useSample" type="button">Pakai gambar uji</button>
+      </div>
+    </div>
+    <div class="row3">
+      <div>
+        <label>Jumlah salinan</label>
+        <input id="copies" type="number" value="1" min="1" max="10">
+      </div>
+      <div>
+        <label>Kepekatan (1–5)</label>
+        <input id="density" type="number" value="3" min="1" max="5" readonly
+               title="Diatur di Admin: Printer Configuration -> Photo & Print Calibration">
+      </div>
+      <div>
+        <label>Geser vertikal (px)</label>
+        <input id="offset_y" type="number" value="0" step="1" readonly
+               title="Diatur di Admin: Printer Configuration -> Photo & Print Calibration">
+      </div>
+    </div>
+
+    <!-- Driver MERENTANG gambar mengisi label (`drawImage(bmp, 0, dy, w, h)`),
+         jadi rasio gambar yang berbeda dari rasio label akan gepeng. Opsi ini
+         menyiapkan gambar lebih dulu supaya foto tidak terdistorsi. -->
+    <div style="margin: 4px 0 12px;">
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="fit" checked style="width:auto;margin-top:3px;">
+        <span>
+          Jaga rasio foto (beri bingkai putih bila perlu)
+          <span style="color:#94a3b8;font-size:11px;display:block;margin-top:2px;">
+            Kalau tidak dicentang, foto direntangkan memenuhi label dan bisa gepeng.
+          </span>
+        </span>
+      </label>
+    </div>
+
+    <p class="facts" style="margin:0 0 12px;font-size:12px;" id="fitInfo">—</p>
+    <div class="actions">
+      <button id="connect" type="button">1. Sambungkan printer</button>
+      <button id="print" type="button" disabled>2. Cetak</button>
+      <button class="ghost" id="clear" type="button">Bersihkan log</button>
+    </div>
+    <div id="log"></div>
+  </section>
+
+  <section>
+    <h2>Catatan penting</h2>
+    <div class="facts">
+      <b>Sambungan putus = harus pilih printer lagi.</b> Driver ini memanggil pemilih perangkat
+      hanya sekali, dan Bluetooth-nya dilepas printer saat idle. Jadi setiap kali printer mati
+      sendiri atau pindah perangkat, klik “Sambungkan printer” lagi.<br><br>
+      <b>Gambar diambil lewat jaringan</b> (<code>fetch</code>), jadi berkas lokal harus dibaca
+      sebagai data-URL (halaman ini sudah begitu) dan gambar dari server harus mengizinkan CORS.
+    </div>
+  </section>
+</main>
+
+<!-- Service cetak baru, memakai NiimBlueLib (@mmote/niimbluelib) yang dipakai
+     niimblue (MultiMote/niimblue) — bukan driver protokol buatan sendiri.
+     Dibundel lewat Vite supaya Web Bluetooth + library-nya jalan di browser. -->
+<!-- Entry TS diproses Vite: halaman ini adalah salah satu entry build, jadi
+     skrip hasil kompilasi disuntikkan otomatis dengan nama berkas yang benar. -->
+<script type="module" src="./niimbot-print-service.ts"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var logEl = $('log');
+
+  function log(msg, cls) {
+    var t = new Date().toLocaleTimeString('id-ID');
+    var line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = '[' + t + '] ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log(msg);
+  }
+
+  // --- Service cetak (NiimBlueLib), dimuat sebagai modul --------------------
+  // Modul dimuat asinkron, jadi UI menunggu sampai siap. Sebelum siap, tombol
+  // cetak tetap terkunci — bukan dibiarkan ada tapi gagal saat diklik.
+  var printService = null;
+  var printReady = false;
+  function onServiceReady(api) {
+    if (printReady) return;
+    printService = api;
+    printReady = true;
+    log('Service cetak siap (NiimBlueLib). Kepala cetak B1 Pro: '
+        + printService.B1_PRO_PRINTHEAD_PX + ' px.', 'ok');
+    log('Web Bluetooth: ' + (printService.isSupported() ? 'tersedia' : 'TIDAK tersedia'), 
+        printService.isSupported() ? 'ok' : 'bad');
+    refreshGeometry();
+  }
+  window.addEventListener('niimbot-print-service-ready', function (ev) { onServiceReady(ev.detail); });
+  // Cadangan: kalau modul sudah selesai dimuat sebelum listener ini terpasang.
+  if (window.NiimbotPrint) onServiceReady(window.NiimbotPrint);
+
+  // Batas kepala cetak B1 Pro: hasil pengukuran di kertas pada unit yang dipakai.
+  // NiimBlueLib menulis 567 untuk B1_PRO; angka itu dari tabel model, bukan unit ini.
+  var PRINTHEAD_PX = 576;
+
+  function currentSize() {
+    var w_mm = parseFloat($('w_mm').value);
+    var h_mm = parseFloat($('h_mm').value);
+
+    if (!printReady) return null;
+    // Perhitungan dari service — sumber yang sama dipakai saat mencetak.
+    //
+    // Dikembalikan APA ADANYA (widthPx/heightPx/requestedWidthPx). Sebelumnya
+    // fungsi ini menyalinnya ke nama pendek (w_px/h_px), lalu objek bernama
+    // pendek itu diteruskan ke printService.print() yang membaca widthPx —
+    // hasilnya undefined, canvas berlebar 0, dan errornya
+    // "The source width is 0." yang sama sekali tidak menunjuk ke penyebabnya.
+    // Satu nama saja untuk satu nilai.
+    return printService.labelSize(w_mm, h_mm);
+  }
+
+  function refreshGeometry() {
+    var g = currentSize();
+    if (!g) { $('geom').textContent = 'Ukuran tidak valid.'; return; }
+    var mm = function (px) { return (px * 25.4 / 300).toFixed(2); };
+    var txt = 'label ' + g.widthPx + ' × ' + g.heightPx + ' px  (' + mm(g.widthPx) + ' × ' + mm(g.heightPx) + ' mm)';
+    if (g.clamped) {
+      // Penting dibedakan: gambar DIPERKECIL supaya utuh, bukan dipotong.
+      // Menuliskan "hilang" akan membuat orang mencari bagian foto yang
+      // sebenarnya ada di sana.
+      txt += '  —  kertas ' + g.requestedWidthPx + ' px lebih lebar dari kepala cetak '
+           + g.widthPx + ' px, sehingga gambar DIPERKECIL ' + (100 * g.widthPx / g.requestedWidthPx).toFixed(1)
+           + '% agar seluruhnya muat. Tidak ada bagian yang terpotong.';
+    } else {
+      txt += '  —  muat di kepala cetak';
+    }
+    $('geom').textContent = txt;
+  }
+
+  ['w_mm', 'h_mm', 'offset_y'].forEach(function (id) {
+    $(id).addEventListener('input', function () { refreshGeometry(); updateFitInfo(); });
+  });
+  refreshGeometry();
+
+  // --- Gambar uji bawaan, digambar di canvas lalu jadi data-URL -------------
+  // Dipakai data-URL karena driver mengambil gambar lewat fetch(); ini menghindari
+  // masalah CORS sepenuhnya.
+  //
+  // Ukurannya diambil dari UKURAN LABEL SESUNGGUHNYA, bukan angka tetap. Gambar
+  // uji berasio beda dengan label akan mencetak bingkai putih, dan bingkai itu
+  // mudah disalahartikan sebagai bug cetak. Pakai ukuran label supaya yang
+  // terlihat di kertas memang apa yang diuji, tanpa bingkai palsu.
+  function sampleImage() {
+    var g = currentSize();
+    var W = g ? g.widthPx : 576;
+    var H = g ? g.heightPx : 714;
+    var c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    var x = c.getContext('2d');
+    x.fillStyle = '#fff'; x.fillRect(0, 0, W, H);
+    x.fillStyle = '#000';
+    x.fillRect(20, 20, W - 40, 6);
+    x.fillRect(20, 34, W - 40, 2);
+    x.font = 'bold 46px sans-serif';
+    x.fillText('UJI CETAK', 34, 130);
+    x.font = '26px sans-serif';
+    x.fillText('Niimbot B1 Pro', 34, 180);
+    x.fillText('300 dpi · ' + W + ' px lebar', 34, 218);
+    x.fillText('Tinggi label ' + H + ' px', 34, 254);
+    x.fillText('Kepekatan: ' + $('density').value, 34, 290);
+    x.fillText(new Date().toLocaleString('id-ID'), 34, 326);
+    x.font = 'bold 22px sans-serif';
+    x.fillText('1 2 3 4 5 6 7 8 9 0', 34, 400);
+    x.font = '20px sans-serif';
+    x.fillText('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 34, 436);
+    x.fillText('abcdefghijklmnopqrstuvwxyz', 34, 466);
+    // Blok abu-abu: 16 tingkat, untuk memeriksa hasil skala abu-abu.
+    x.font = '18px sans-serif';
+    x.fillText('Skala abu-abu:', 34, 520);
+    for (var i = 0; i < 16; i++) {
+      var v = Math.round(i * 255 / 15);
+      x.fillStyle = 'rgb(' + v + ',' + v + ',' + v + ')';
+      x.fillRect(34 + i * 32, 535, 30, 40);
+    }
+    x.fillStyle = '#000';
+    // Kotak tepi: menguji apakah sisi kanan/kiri terpotong. Kalau gambar
+    // diperkecil dengan benar, SELURUH kotak ini harus tercetak.
+    x.lineWidth = 4;
+    x.strokeRect(2, H - 125, W - 4, 120);
+    x.font = 'bold 20px sans-serif';
+    x.fillText('tepi kiri', 12, H - 80);
+    x.fillText('tepi kanan', W - 130, H - 80);
+    x.font = '18px sans-serif';
+    x.fillText('kotak ini harus tercetak UTUH', 40, H - 40);
+    return c.toDataURL('image/png');
+  }
+
+  var currentImageUrl = null;
+  var currentImageSize = null;   // { w, h } gambar sumber, untuk hitung rasio
+
+  // --- Nilai dari Pengaturan Admin -------------------------------------------
+  // Ukuran kertas, kepekatan, geser vertikal, dan penyesuaian foto TIDAK lagi
+  // diatur di halaman ini. Nilainya dibaca dari kiosk-agent lewat local bridge,
+  // sumber yang sama dengan photobooth produksi — jadi yang diuji di sini
+  // benar-benar setelan yang dipakai.
+  //
+  // Kalau agent tidak jalan, halaman memakai nilai netral DAN mengatakannya,
+  // supaya tidak ada yang mengira sedang menguji setelan produksi.
+  var LAST_ADMIN_CONFIG = null;
+
+  function applyAdminConfig(cfg) {
+    if (!cfg) return false;
+    var applied = false;
+
+    // Ukuran kertas dari Admin, mis. "CUSTOM 54X67 MM".
+    var m = String(cfg.paperSize || '').match(/CUSTOM\s+(\d{1,3})\s*[X×]\s*(\d{1,3})\s*MM/i);
+    if (m) {
+      $('w_mm').value = m[1];
+      $('h_mm').value = m[2];
+      applied = true;
+    }
+
+    if (cfg.thermalDensity !== undefined) { $('density').value = cfg.thermalDensity; applied = true; }
+    if (cfg.thermalOffsetYPx !== undefined) { $('offset_y').value = cfg.thermalOffsetYPx; applied = true; }
+
+    if (applied) {
+      refreshGeometry();
+      updateFitInfo();
+    }
+
+    // Tampilkan asal nilai supaya tidak menyesatkan.
+    var src = $('adminSource');
+    var parts = [];
+    if (cfg.paperSize) parts.push('kertas ' + cfg.paperSize);
+    if (cfg.thermalDensity !== undefined) parts.push('kepekatan ' + cfg.thermalDensity);
+    if (cfg.thermalOffsetYPx !== undefined) parts.push('geser ' + cfg.thermalOffsetYPx + ' px');
+    if (cfg.photoBrightness !== undefined) {
+      parts.push('tampilan ' + cfg.photoBrightness + '% / ' + cfg.photoContrast + '% / ' + cfg.photoSaturation + '%');
+    }
+    if (cfg.photoFitMode) parts.push('mode ' + cfg.photoFitMode);
+
+    src.innerHTML = parts.length
+      ? '<b>Dari Pengaturan Admin:</b> ' + parts.join(' · ')
+      : '<b>Agent tersambung</b>, tetapi Admin belum menyimpan pengaturan cetak. Memakai nilai netral.';
+    src.className = parts.length ? 'facts ok' : 'facts';
+    return applied;
+  }
+
+  // Baca saat halaman dibuka, lalu ikuti perubahan berikutnya.
+  //
+  // Pembacaan pertama dilakukan LANGSUNG, bukan menunggu interval: kalau hanya
+  // interval, halaman sempat menampilkan nilai netral beberapa detik dan orang
+  // bisa menyimpulkan setelan produksinya netral padahal bukan.
+  //
+  // DUA SUMBER, backend lebih dulu:
+  //   1. Backend lewat HTTP (VITE_API_BASE_URL) — tidak butuh kiosk-agent.
+  //      Ini yang dipakai kalau Anda mencetak langsung lewat Web Bluetooth.
+  //   2. Local bridge agent di port 3011 — cadangan untuk kiosk yang agent-nya
+  //      jalan. Dulu ini satu-satunya sumber, sehingga agent mati berarti
+  //      ukuran kertas/kepekatan/geser tidak bisa dibaca sama sekali.
+  (function watchAdminConfig() {
+    var bridgePort = 3011;   // LOCAL_BRIDGE_PORT agent
+
+    /**
+     * API base + kunci kiosk, dibaca dari sumber yang SAMA dengan photobooth:
+     * `pb_config` di localStorage (tempat halaman produksi menyimpan
+     * backendUrl + apiKey). Tidak ada nilai yang ditulis ke berkas ini, supaya
+     * kunci kiosk tidak pernah ikut ter-commit.
+     */
+    function readApi() {
+      var out = { base: '', key: '' };
+      try {
+        var raw = localStorage.getItem('pb_config');
+        if (raw) {
+          var cfg = JSON.parse(raw);
+          out.base = String(cfg.backendUrl || '').replace(/\/$/, '');
+          out.key = String(cfg.apiKey || '').trim();
+        }
+      } catch (e) { /* localStorage bisa diblokir; perlakukan sebagai tidak ada */ }
+      if (!out.base) out.base = String(window.__API_BASE_URL__ || '').replace(/\/$/, '');
+      if (!out.key) out.key = String(window.__KIOSK_API_KEY__ || '').trim();
+      return out;
+    }
+
+    var firstRead = true;
+
+    /** Nilai dari agent bentuknya beda dengan backend; samakan dulu. */
+    function fromAgent(d) {
+      return {
+        paperSize: d.paperSize,
+        thermalDensity: d.thermalDensity,
+        thermalOffsetYPx: d.thermalOffsetYPx,
+        photoBrightness: d.photoBrightness,
+        photoContrast: d.photoContrast,
+        photoSaturation: d.photoSaturation,
+        photoFitMode: d.photoFitMode,
+      };
+    }
+
+    /** Nilai dari backend (snake_case). */
+    function fromBackend(d) {
+      return {
+        paperSize: d.paper_size,
+        thermalDensity: d.thermal_density,
+        thermalOffsetYPx: d.thermal_offset_y_px,
+        photoBrightness: d.photo_brightness,
+        photoContrast: d.photo_contrast,
+        photoSaturation: d.photo_saturation,
+        photoFitMode: d.photo_fit_mode,
+      };
+    }
+
+    function readBackend() {
+      var api = readApi();
+      if (!api.base || !api.key) return Promise.reject(new Error('tanpa API'));
+      return fetch(api.base + '/kiosk/printing-config', { headers: { 'x-api-key': api.key } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (!j || !j.data) throw new Error('kosong');
+          return fromBackend(j.data);
+        });
+    }
+
+    function readAgent() {
+      return fetch('http://localhost:' + bridgePort + '/api/kiosk-status')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (!j || !j.data) throw new Error('kosong');
+          return fromAgent(j.data);
+        });
+    }
+
+    function note(teks, cls) {
+      var src = $('adminSource');
+      if (src.innerHTML === teks) return;
+      src.innerHTML = teks;
+      src.className = 'facts' + (cls ? ' ' + cls : '');
+    }
+
+    var poll = function () {
+      var asal = 'backend';
+      readBackend()
+        .catch(function () { asal = 'agent'; return readAgent(); })
+        .then(function (cfg) {
+          LAST_ADMIN_CONFIG = cfg;
+          applyAdminConfig(cfg);
+          if (asal === 'agent') {
+            // Katakan dari mana nilainya datang; kalau tidak, orang mengira
+            // Admin tidak berpengaruh padahal agent yang memasok.
+            note($('adminSource').innerHTML + ' <i>(lewat kiosk-agent)</i>', 'ok');
+          }
+          firstRead = false;
+        })
+        .catch(function () {
+          // Kedua sumber mati. Katakan terus terang, jangan diam-diam.
+          note('Pengaturan Admin <b>tidak bisa dibaca</b> — backend tidak menjawab '
+            + 'dan kiosk-agent tidak jalan. Halaman memakai nilai netral. '
+            + 'Cek koneksi, lalu muat ulang.', 'warn');
+          firstRead = false;
+        });
+    };
+    poll();
+    var timer = setInterval(poll, 5000);
+    window.addEventListener('beforeunload', function () { clearInterval(timer); });
+  })();
+
+
+
+  /**
+   * Menghitung gambar yang siap dicetak.
+   *
+   * Driver merentang gambar mengisi label (`drawImage(bmp, 0, dy, w, h)`), jadi:
+   *  - mode "sesuaikan" (bawaan): gambar diskalakan mempertahankan rasio, lalu
+   *    diberi bingkai putih supaya sisa label tidak hitam. Foto tidak gepeng.
+   *  - mode "rentangkan": gambar memenuhi label; rasio berbeda = foto gepeng.
+   *
+   * Dikembalikan sebagai data-URL (bukan URL ke server) supaya bebas dari masalah
+   * CORS — driver mengambil gambar lewat fetch().
+   */
+  function renderForPrint() {
+    var g = currentSize();
+    if (!g) return null;
+    if (!currentImageUrl) return null;
+
+    // Background putih penuh label, lalu hasil gambar di atasnya.
+    var c = document.createElement('canvas');
+    c.width = g.widthPx; c.height = g.heightPx;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, g.widthPx, g.heightPx);
+
+    return new Promise(function (resolve) {
+      var img = new Image();
+      img.onload = function () {
+        var dw = g.widthPx, dh = g.heightPx;
+        var dx = 0, dyv = 0;
+        if ($('fit').checked && currentImageSize) {
+          // Skalakan mempertahankan rasio, muat di dalam label.
+          var scale = Math.min(g.widthPx / currentImageSize.w, g.heightPx / currentImageSize.h);
+          dw = Math.round(currentImageSize.w * scale);
+          dh = Math.round(currentImageSize.h * scale);
+          dx = Math.round((g.widthPx - dw) / 2);
+          dyv = Math.round((g.heightPx - dh) / 2);
+        }
+        ctx.drawImage(img, dx, dyv, dw, dh);
+        resolve(c.toDataURL('image/png'));
+      };
+      img.onerror = function () { resolve(currentImageUrl); };
+      img.src = currentImageUrl;
+    });
+  }
+
+  $('useSample').addEventListener('click', function () {
+    currentImageUrl = sampleImage();
+    // Ukuran harus sama dengan canvas yang baru digambar, kalau tidak
+    // informasi rasio di bawah akan salah.
+    var g = currentSize();
+    currentImageSize = { w: (g ? g.widthPx : 576), h: (g ? g.heightPx : 714) };
+    log('Gambar uji ' + currentImageSize.w + ' × ' + currentImageSize.h
+        + ' px disiapkan — sama dengan ukuran label, jadi tidak ada bingkai putih.', 'ok');
+    updateFitInfo();
+  });
+
+  $('file').addEventListener('change', function (e) {
+    var f = e.target.files && e.target.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      currentImageUrl = reader.result;
+      var img = new Image();
+      img.onload = function () {
+        currentImageSize = { w: img.naturalWidth, h: img.naturalHeight };
+        var g = currentSize();
+        if (g && img.naturalWidth !== g.widthPx) {
+          log('Gambar ' + img.naturalWidth + '×' + img.naturalHeight + ' akan disesuaikan ke label '
+              + g.widthPx + '×' + g.heightPx + ' px.', 'ok');
+        } else {
+          log('Berkas siap: ' + f.name, 'ok');
+        }
+        updateFitInfo();
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(f);
+  });
+
+  /**
+   * Menjelaskan apa yang akan terjadi pada gambar dengan pengaturan sekarang:
+   * apakah rasio cocok, atau akan ada bingkai putih / gambar gepeng.
+   */
+  function updateFitInfo() {
+    var el = $('fitInfo');
+    if (!currentImageSize) { el.textContent = 'Pilih gambar dulu untuk melihat kecocokan.'; return; }
+    var g = currentSize();
+    if (!g) { el.textContent = '—'; return; }
+
+    var imgAr = currentImageSize.w / currentImageSize.h;
+    var labAr = g.widthPx / g.heightPx;
+    var diff = Math.abs(imgAr - labAr);
+    var sameRatio = diff < 0.02;
+
+    if (sameRatio) {
+      el.innerHTML = 'Rasio gambar <b>sama</b> dengan label (' + imgAr.toFixed(3) + ') — '
+        + 'tercetak penuh tanpa bingkai.';
+      return;
+    }
+    if ($('fit').checked) {
+      el.innerHTML = 'Rasio gambar ' + imgAr.toFixed(3) + ' vs label ' + labAr.toFixed(3)
+        + ' — gambar <b>tidak gepeng</b>, ada bingkai putih di sisinya.';
+    } else {
+      el.innerHTML = '<span class="bad">Rasio gambar ' + imgAr.toFixed(3) + ' vs label '
+        + labAr.toFixed(3) + ' — gambar akan DIPAKSA memenuhi label, hasilnya ' 
+        + (imgAr < labAr ? 'lebih gepeng' : 'lebih kurus') + '.</span>';
+    }
+  }
+  $('fit').addEventListener('change', updateFitInfo);
+
+  // --- Sambung & cetak -----------------------------------------------------
+  // Keduanya lewat printService (NiimBlueLib). Tidak ada lagi panggilan langsung
+  // ke driver lama: satu jalur cetak saja, supaya tidak ada dua implementasi
+  // yang bisa berbeda perilaku.
+  function printAdjustments() {
+    return {
+      brightness: parseInt($('photoBrightness') && $('photoBrightness').value, 10) || 100,
+      contrast: parseInt($('photoContrast') && $('photoContrast').value, 10) || 100,
+      saturation: parseInt($('photoSaturation') && $('photoSaturation').value, 10) || 100,
+      density: parseInt($('density').value, 10) || 3,
+      offsetYPx: parseInt($('offset_y').value, 10) || 0,
+      fitMode: $('fit').checked ? 'fit' : 'stretch',
+    };
+  }
+
+  $('connect').addEventListener('click', function () {
+    var btn = this;
+    if (!printReady) { log('Service cetak belum siap — tunggu sebentar lalu coba lagi.', 'bad'); return; }
+    if (!printService.isSupported()) {
+      log('Web Bluetooth tidak tersedia. Pakai Chrome/Edge, dan buka lewat https:// atau localhost.', 'bad');
+      return;
+    }
+
+    btn.disabled = true;
+    log('Membuka pemilih perangkat Bluetooth…');
+
+    if (!currentImageUrl) { currentImageUrl = sampleImage(); var gg = currentSize(); currentImageSize = { w: (gg ? gg.widthPx : 576), h: (gg ? gg.heightPx : 714) }; }
+    var g = currentSize();
+    if (!g) { log('Ukuran label tidak valid.', 'bad'); btn.disabled = false; return; }
+
+    printService.connect()
+      .then(function (info) {
+        log('Tersambung: ' + info.deviceName + ' (' + info.model + '), print task ' + info.printTask
+            + ', kepala cetak ' + info.printheadPx + ' px.', 'ok');
+        log('Mencetak 1 label uji pada ' + g.widthPx + ' × ' + g.heightPx + ' px…');
+        return printService.print(currentImageUrl, g, 1, printAdjustments(), function (page, total) {
+          log('  halaman ' + page + '/' + total + ' terkirim');
+        });
+      })
+      .then(function () {
+        log('Tersambung dan 1 label uji tercetak.', 'ok');
+        $('print').disabled = false;
+        btn.disabled = false;
+      })
+      .catch(function (err) {
+        log('Gagal: ' + (err && err.message ? err.message : err), 'bad');
+        btn.disabled = false;
+      });
+  });
+
+  $('print').addEventListener('click', function () {
+    var btn = this;
+    if (!printReady) { log('Service cetak belum siap.', 'bad'); return; }
+    if (!currentImageUrl) { log('Pilih berkas atau pakai gambar uji dulu.', 'bad'); return; }
+    var g = currentSize();
+    if (!g) { log('Ukuran label tidak valid.', 'bad'); return; }
+    var copies = Math.max(1, parseInt($('copies').value, 10) || 1);
+    var adj = printAdjustments();
+
+    btn.disabled = true;
+    log('Mencetak ' + copies + ' salinan pada ' + g.widthPx + ' × ' + g.heightPx + ' px…');
+    log('  penyesuaian: brightness ' + adj.brightness + '%, contrast ' + adj.contrast
+        + '%, saturasi ' + adj.saturation + '%, kepekatan ' + adj.density
+        + ', geser ' + adj.offsetYPx + ' px, mode ' + adj.fitMode);
+
+    printService.print(currentImageUrl, g, copies, adj, function (page, total) {
+      log('  halaman ' + page + '/' + total + ' terkirim');
+    })
+      .then(function () {
+        log('Selesai — ' + copies + ' label tercetak.', 'ok');
+        btn.disabled = false;
+      })
+      .catch(function (err) {
+        var msg = err && err.message ? err.message : String(err);
+        log('Gagal: ' + msg, 'bad');
+        if (/terputus|disconnected|gatt/i.test(msg)) {
+          log('Klik “Sambungkan printer” lagi untuk memilih perangkat.', 'bad');
+        }
+        btn.disabled = false;
+      });
+  });
+
+  $('clear').addEventListener('click', function () { logEl.textContent = ''; });
+
+  updateFitInfo();   // isi keterangan kecocokan sejak awal, bukan menunggu gambar dipilih
+  log('Siap. Langkah: pilih gambar → Sambungkan printer → Cetak.');
+  log('Batas kepala cetak B1 Pro: ' + PRINTHEAD_PX + ' px (' + (PRINTHEAD_PX * 25.4 / 300).toFixed(2) + ' mm).');
+})();
+</script>
+</body>
+</html>
