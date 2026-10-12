@@ -80,7 +80,7 @@ interface PhotoBoothProps {
   idlePaused?: boolean;
 }
 
-type BoothStep = 'LANDING' | 'PACKAGE' | 'LAYOUT' | 'PAYMENT' | 'PAYMENT_SCAN' | 'PAYMENT_CHECKING' | 'CAPTURE' | 'EDIT' | 'RESULT';
+type BoothStep = 'LANDING' | 'PACKAGE' | 'LAYOUT' | 'PAYMENT' | 'PAYMENT_SCAN' | 'PAYMENT_CHECKING' | 'CAPTURE' | 'EDIT' | 'PRINT_SELECTION' | 'RESULT';
 type PrintState = 'idle' | 'preparing' | 'uploading' | 'queued' | 'printing' | 'success' | 'failed';
 
 const ACTIVE_PRINT_STORAGE_KEY = 'unismiles_active_print_job';
@@ -100,10 +100,13 @@ interface PersistedPrintJob {
   sessionCode: string;
   jobId: string;
   imageUrl: string;
+  digitalImageUrl?: string;
   idempotencyKey: string;
   status: 'queued' | 'printing';
   createdAt: number;
 }
+
+const digitalImageForPrintJob = (job: PersistedPrintJob): string => job.digitalImageUrl || job.imageUrl;
 
 const makeIdempotencyKey = (): string => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -705,11 +708,12 @@ const generatePrintImage = async (
     photo: string,
     frame: FrameStyle | null | undefined,
     layoutId: GridLayoutId | null | undefined,
+    photoIndex: number,
 ): Promise<string | null> => {
     if (!photo) return null;
     try {
         const config = getEffectiveLayoutConfig(frame, layoutId);
-        const slot = firstSlot(config.slots);
+        const slot = Number.isInteger(photoIndex) && photoIndex >= 0 ? config.slots[photoIndex] : null;
         if (!slot) return null;
 
         const img = await loadImageElement(photo);
@@ -726,7 +730,7 @@ const generatePrintImage = async (
 
         return canvas.toDataURL('image/png');
     } catch (e) {
-        console.warn('Gambar cetak gagal disiapkan, memakai foto mentah:', e);
+        console.warn('Gambar cetak gagal disiapkan:', e);
         return null;
     }
 };
@@ -844,6 +848,9 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
   const [selectedPackage, setSelectedPackage] = useState<'print' | 'digital' | null>(null);
   const [selectedLayoutId, setSelectedLayoutId] = useState<GridLayoutId | null>(null);
   const [capturedPhotos, setCapturedPhotos] = useState<string[]>([]);
+  const [selectedPrintPhotoIndex, setSelectedPrintPhotoIndex] = useState<number | null>(null);
+  const [printSelectionConfirmed, setPrintSelectionConfirmed] = useState(false);
+
   const [selectedFilter, setSelectedFilter] = useState<PhotoFilter | null>(null);
 
   /**
@@ -948,14 +955,20 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
    * kiosk-agent di PC yang sama menariknya. Di kiosk ini agent memang tidak
    * jalan, jadi cetak otomatis tidak pernah sampai ke printer.
    */
+  const prepareSelectedPrintImage = async (): Promise<string> => {
+    if (selectedPackage !== 'print' || step !== 'RESULT' || !printSelectionConfirmed
+      || selectedPrintPhotoIndex === null || !Number.isInteger(selectedPrintPhotoIndex)
+      || selectedPrintPhotoIndex < 0 || !capturedPhotos[selectedPrintPhotoIndex]) {
+      throw new Error('Pilih dan konfirmasi satu foto yang ingin dicetak.');
+    }
+    const image = await generatePrintImage(capturedPhotos[selectedPrintPhotoIndex],
+      processedFrame || selectedFrame, selectedLayoutId, selectedPrintPhotoIndex);
+    if (!image) throw new Error('Gambar cetak gagal disiapkan. Silakan coba lagi.');
+    return image;
+  };
+
   const printViaBluetoothCore = async (options: { izinkanPasang?: boolean } = {}): Promise<void> => {
-      const rawPhoto = capturedPhotos[0] || null;
-      const frameForPrint = processedFrame || selectedFrame;
-      const image = (rawPhoto ? await generatePrintImage(rawPhoto, frameForPrint, selectedLayoutId) : null)
-        || rawPhoto
-        || (finalUploadedUrl?.startsWith('http') || finalUploadedUrl?.startsWith('data:') ? finalUploadedUrl : null)
-        || await generateCompositeImage();
-      if (!image) throw new Error('Foto final belum tersedia.');
+      const image = await prepareSelectedPrintImage();
 
       const printer = bluetoothPrinterRef.current || new NiimbotPrinter();
       bluetoothPrinterRef.current = printer;
@@ -1061,7 +1074,7 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
     // foto sudah tak mungkin di tahap ini, cetak ulang hanya menghabiskan
     // kertas tanpa foto baru — pengunjung yang kehilangan cetakan cukup
     // diminta ulang oleh petugas tanpa lewat layar ini.
-    if (btPrintState === 'done') return;
+    if (selectedPackage !== 'print' || printActionInFlightRef.current || isPrintActive || printState === 'success' || btPrintState === 'done') return;
     if (btPrintState === 'connecting' || btPrintState === 'printing') return;
     if (!NiimbotPrinter.isSupported()) {
       setBtPrintState('failed');
@@ -1069,6 +1082,7 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
       return;
     }
 
+    printActionInFlightRef.current = true;
     setBtPrintError(null);
     setBtPrintState('connecting');
 
@@ -1078,6 +1092,7 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
       // dipasangkan pada alamat ini. Itu yang membuat satu klik cukup.
       await printViaBluetoothCore({ izinkanPasang: true });
       setBtPrintState('done');
+      setPrintState('success');
     } catch (error: any) {
       const msg = String(error?.message || error);
       setBtPrintState('failed');
@@ -1087,6 +1102,8 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
         ? 'Pemilih perangkat ditutup. Klik lagi untuk menyambungkan printer.'
         : msg);
       void bluetoothPrinterRef.current?.reportStatus('ERROR', { lastError: msg });
+    } finally {
+      printActionInFlightRef.current = false;
     }
   };
 
@@ -1350,6 +1367,11 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
   const [emailError, setEmailError] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'preparing' | 'uploading' | 'success' | 'error'>('idle');
   const [sessionCode, setSessionCode] = useState<string>('');
+  // New captures/retakes and sessions invalidate any previously confirmed choice.
+  useEffect(() => {
+    setSelectedPrintPhotoIndex(null);
+    setPrintSelectionConfirmed(false);
+  }, [capturedPhotos, sessionCode, selectedPackage]);
   const [qrisUrl, setQrisUrl] = useState<string | null>(null);
   const [qrisLoading, setQrisLoading] = useState(false);
   const [finalUploadedUrl, setFinalUploadedUrl] = useState<string | null>(null);
@@ -2057,6 +2079,10 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
       // Ensure state is clear when starting fresh
       setSelectedPackage(null);
       setCapturedPhotos([]);
+      setSelectedPrintPhotoIndex(null);
+      setPrintSelectionConfirmed(false);
+      setBtPrintState('idle');
+      setBtPrintError(null);
       setCaptureDeadline(null);
       setRemainingCaptureSeconds(0);
       setRetakeIndex(null);
@@ -2607,11 +2633,24 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
     return () => window.removeEventListener('keydown', handleDevKey);
   }, [step]);
 
-  const handleFinish = () => { 
-    setStep('RESULT'); 
-    setIsResultPanelCollapsed(window.innerWidth < 1280); 
+  const handleFinish = () => {
+    const singlePhoto = selectedPackage === 'print' && capturedPhotos.length === 1;
+    setSelectedPrintPhotoIndex(singlePhoto ? 0 : null);
+    setPrintSelectionConfirmed(singlePhoto);
+    setStep(selectedPackage === 'print' && !singlePhoto ? 'PRINT_SELECTION' : 'RESULT');
+    setIsResultPanelCollapsed(window.innerWidth < 1280);
   };
 
+
+  const handleConfirmPrintSelection = () => {
+    if (step !== 'PRINT_SELECTION' || selectedPackage !== 'print'
+      || printActionInFlightRef.current || isPrintActive
+      || btPrintState === 'connecting' || btPrintState === 'printing') return;
+    if (selectedPrintPhotoIndex === null || !Number.isInteger(selectedPrintPhotoIndex)
+      || selectedPrintPhotoIndex < 0 || !capturedPhotos[selectedPrintPhotoIndex]) return;
+    setPrintSelectionConfirmed(true);
+    setStep('RESULT');
+  };
 
   const startAutoCapture = () => {
     if (captureExpired) return;
@@ -3124,20 +3163,20 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
   }, []);
 
   const handleManualPrint = async () => {
+      if (printActionInFlightRef.current || isPrintActive || printState === 'success' || btPrintState === 'done') return;
       if (!areAssetsReady) {
           alert('Tunggu sampai hasil foto selesai diproses.');
           return;
       }
 
+      printActionInFlightRef.current = true;
       try {
-          // Manual fallback remains an explicit user action and uses the same
-          // final composited image as automatic printing.
-          const imageUrl = finalUploadedUrl || await generateCompositeImage();
-          if (!imageUrl) throw new Error('Foto final belum tersedia.');
+          const imageUrl = await prepareSelectedPrintImage();
 
           const printConfig = getEffectiveLayoutConfig(processedFrame || selectedFrame, selectedLayoutId);
           const printHeight = 6;
-          const printWidth = printHeight * (printConfig.width / printConfig.height);
+          const slot = printConfig.slots[selectedPrintPhotoIndex!];
+          const printWidth = printHeight * (slot.width / slot.height);
           const win = window.open('', '_blank');
           if (!win) throw new Error('Jendela print diblokir browser.');
           win.document.title = 'UniSmile Photo Print';
@@ -3146,16 +3185,18 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
           win.document.head.appendChild(style);
           const image = win.document.createElement('img');
           image.src = imageUrl;
-          image.onload = () => { win.focus(); win.print(); };
+          image.onload = () => { win.focus(); win.print(); setPrintState('success'); printActionInFlightRef.current = false; };
+          image.onerror = () => { setPrintError('Gambar cetak gagal dimuat.'); setPrintState('failed'); printActionInFlightRef.current = false; win.close(); };
           win.document.body.appendChild(image);
       } catch (error) {
-          setPrintError('Print manual tidak dapat dibuka. Izinkan popup lalu coba lagi.');
+          printActionInFlightRef.current = false;
+          setPrintError(error instanceof Error ? error.message : 'Print manual tidak dapat dibuka. Izinkan popup lalu coba lagi.');
           setPrintState('failed');
       }
   };
 
   const handleAutoPrint = async () => {
-      if (printActionInFlightRef.current || isPrintActive || printState === 'success') return;
+      if (printActionInFlightRef.current || isPrintActive || printState === 'success' || btPrintState === 'done') return;
       if (!areAssetsReady || !sessionCode) {
           setPrintError(!sessionCode ? 'Sesi foto belum tersedia.' : 'Tunggu sampai hasil foto selesai diproses.');
           setPrintState('failed');
@@ -3167,6 +3208,7 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
       setPrintState('preparing');
 
       try {
+          const printImage = await prepareSelectedPrintImage();
           // Recover an already-created job after a refresh/re-render rather
           // than creating a second physical print.
           const existingJob = getPersistedPrintJob();
@@ -3177,8 +3219,8 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
               return;
           }
 
-          let imageUrl = finalUploadedUrl?.startsWith('http') ? finalUploadedUrl : null;
-          if (!imageUrl) {
+          let digitalUrl = finalUploadedUrl?.startsWith('http') ? finalUploadedUrl : null;
+          if (!digitalUrl) {
               // A previous upload failure is retryable. Do not reuse the
               // already-resolved rejected/null promise on the next click.
               if (uploadStatus === 'error') {
@@ -3186,9 +3228,9 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
                   setUploadStatus('idle');
               }
               setPrintState('uploading');
-              imageUrl = await doAutoUpload();
+              digitalUrl = await doAutoUpload();
           }
-          if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) {
+          if (!digitalUrl || !/^https?:\/\//i.test(digitalUrl)) {
               throw new Error('Image final belum tersedia di server.');
           }
 
@@ -3203,15 +3245,9 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
               ? adminPaperSize
               : getPaperSizeForLayout(selectedLayoutId);
 
-          // CETAK LANGSUNG DULU, bukan lewat server.
-          //
-          // Printer label NIIMBOT tersambung lewat Web Bluetooth di browser ini
-          // dan TIDAK muncul sebagai printer sistem, jadi kiosk-agent tidak bisa
-          // menjangkaunya. Kerja samanya: pekerjaan dititipkan ke server
-          // (queuePrintJob) dan ditunggu agent menariknya — kalau agent tidak
-          // jalan, cetak otomatis tidak pernah sampai ke printer. Jadi jalur
-          // langsung dipakai lebih dulu, dan pekerjaan server tetap dicatat
-          // sesudahnya supaya pelaporan serta riwayat tetap utuh.
+          // Prefer direct native/Bluetooth printing when available. Only use the
+          // server printer when direct printing is unsupported; never enqueue
+          // another physical job merely to record a completed native print.
           if (NiimbotPrinter.isSupported()) {
               try {
                   setPrintState('printing');
@@ -3226,23 +3262,27 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
                   // Bluetooth" yang gesturnya langsung.
                   await printViaBluetoothCore();
                   setPrintState('success');
-                  // Pencatatan ke server bersifat pelaporan; kegagalannya tidak
-                  // boleh mengubah hasil cetak yang sudah terjadi.
-                  void recordPrintJob(imageUrl, paperSize, printConfig);
+                  printActionInFlightRef.current = false;
+                  clearPersistedPrintJob();
                   return;
               } catch (btError) {
-                  // Jatuh ke jalur server HANYA kalau jalur langsung gagal —
-                  // mis. belum ada perangkat terpasang dan pemilihnya dibatalkan.
-                  console.warn('[PhotoBooth] Cetak langsung gagal, mencoba jalur server.',
-                      btError instanceof Error ? btError.message : 'error');
+                  // Only this preflight error proves that no image reached a printer.
+                  // Preserve system/server printing on Bluetooth-capable but unpaired browsers.
+                  // Any other error (including a post-send timeout) must not trigger a second job.
+                  if (String((btError as any)?.message || btError) !== PRINTER_BELUM_DIPASANGKAN) throw btError;
               }
           }
 
+          // Upload appends a photo row without replacing the digital _frame.
+          // Never assign this URL to finalUploadedUrl or downloadUrl.
+          const printBlob = await (await fetch(printImage)).blob();
+          const imageUrl = await uploadPhoto(printBlob, sessionCode, `${sessionCode}_print_${selectedPrintPhotoIndex! + 1}.png`, 'print');
+          const printSlot = printConfig.slots[selectedPrintPhotoIndex!];
           const job = await queuePrintJob(sessionCode, {
               image_url: imageUrl,
               copies: 1,
               paper_size: paperSize,
-              orientation: printConfig.width > printConfig.height ? 'landscape' : 'portrait',
+              orientation: printSlot.width > printSlot.height ? 'landscape' : 'portrait',
               idempotency_key: idempotencyKey
           });
 
@@ -3252,6 +3292,7 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
               sessionCode,
               jobId: job.job_id,
               imageUrl,
+              digitalImageUrl: digitalUrl,
               idempotencyKey,
               status: job.status === 'printing' ? 'printing' : 'queued',
               createdAt: Date.now()
@@ -3345,7 +3386,7 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
       // Restore only the trackable print record. No API key or credential is
       // persisted here; the existing kiosk auth path is used by polling.
       setSessionCode(saved.sessionCode);
-      setFinalUploadedUrl(saved.imageUrl);
+      setFinalUploadedUrl(digitalImageForPrintJob(saved));
       setPrintJobId(saved.jobId);
       setPrintState(saved.status);
       setSelectedPackage('print');
@@ -4227,6 +4268,34 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
                     </div>
                 </div>
             </div>
+        </BoothWrapper>
+      )}
+
+      {step === 'PRINT_SELECTION' && (
+        <BoothWrapper title="Pilih foto yang ingin dicetak" subtitle="Pilih satu foto untuk dicetak. Foto digital tetap berupa grid lengkap." hideAdmin isLocked={isCursorLocked} onToggleLock={() => setIsCursorLocked(!isCursorLocked)} uiMode={uiMode} hideLogos isVertical={isVertical}>
+          <div className="h-full flex flex-col bg-[#0a1128] text-white p-6 gap-6">
+            <p className="text-center text-lg">Hanya 1 foto yang dicetak, tanpa artwork frame. Semua foto tetap tersedia secara digital.</p>
+            <div role="radiogroup" aria-label="Foto yang ingin dicetak" className="flex-1 min-h-0 overflow-y-auto grid grid-cols-2 md:grid-cols-3 gap-4 content-start">
+              {capturedPhotos.map((photo, index) => (
+                <button key={index} id={`btn-select-print-photo-${index}`} role="radio"
+                  aria-checked={selectedPrintPhotoIndex === index} aria-label={`Foto ${index + 1}`}
+                  disabled={printSelectionConfirmed || isPrintActive || printActionInFlightRef.current}
+                  onClick={() => { if (!printSelectionConfirmed && !printActionInFlightRef.current) setSelectedPrintPhotoIndex(index); }}
+                  className={`rounded-xl overflow-hidden border-4 bg-[#1b2b5a] disabled:opacity-50 ${selectedPrintPhotoIndex === index ? 'border-[#f6cd46]' : 'border-transparent'}`}>
+                  <img src={photo} alt={`Foto ${index + 1}`} className="w-full aspect-video object-contain" />
+                  <span className="block py-3 font-bold">Foto {index + 1}{selectedPrintPhotoIndex === index ? ' ✓ Dipilih' : ''}</span>
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-4 justify-center shrink-0">
+              <button onClick={() => { setSelectedPrintPhotoIndex(null); setPrintSelectionConfirmed(false); setStep('EDIT'); }}
+                disabled={printSelectionConfirmed || isPrintActive || printActionInFlightRef.current}
+                className="px-6 py-4 rounded-xl bg-white/10">Kembali</button>
+              <button id="btn-confirm-print-photo" onClick={handleConfirmPrintSelection}
+                disabled={selectedPrintPhotoIndex === null || printSelectionConfirmed || isPrintActive || printActionInFlightRef.current}
+                className="px-8 py-4 rounded-xl bg-[#f6cd46] text-black font-bold disabled:opacity-40">Konfirmasi foto ini</button>
+            </div>
+          </div>
         </BoothWrapper>
       )}
 

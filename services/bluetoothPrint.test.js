@@ -97,12 +97,12 @@ test('yang dicetak hanya isi slot, tanpa frame', () => {
   const fn = bodyOf('printViaBluetoothCore');
   // Inti keluhan: frame ikut tercetak, dan bagian di luar bingkai slot ikut
   // tercetak. Yang benar hanya isi slot.
-  assert.match(fn, /generatePrintImage\(rawPhoto, frameForPrint, selectedLayoutId\)/,
-    'harus menyiapkan gambar dari isi slot');
-  assert.match(fn, /capturedPhotos\[0\]/, 'sumbernya foto hasil jepretan');
-  // Cadangan berlapis: isi slot -> foto mentah -> hasil akhir -> gambar lengkap.
-  assert.match(fn, /finalUploadedUrl/, 'ada cadangan');
-  assert.match(fn, /generateCompositeImage\(\)/, 'cadangan terakhir');
+  assert.match(fn, /await prepareSelectedPrintImage\(\)/,
+    'harus menyiapkan crop foto yang telah dipilih');
+  const preparation = bodyOf('prepareSelectedPrintImage');
+  assert.match(preparation, /capturedPhotos\[selectedPrintPhotoIndex\]/, 'sumbernya foto pilihan pengguna');
+  assert.ok(!/finalUploadedUrl|generateCompositeImage\(\)/.test(fn),
+    'tidak boleh fallback ke grid/frame digital');
 });
 
 test('generatePrintImage TIDAK menggambar frame apa pun', () => {
@@ -114,7 +114,7 @@ test('generatePrintImage TIDAK menggambar frame apa pun', () => {
   assert.ok(!/getSlotBorderConfig/.test(fn), 'border slot tidak boleh dipakai');
   assert.ok(!/\.elements/.test(fn), 'elemen teks/stiker frame tidak boleh digambar');
   // Dan ukurannya dari slot, bukan dari kanvas layout.
-  assert.match(fn, /firstSlot\(config\.slots\)/, 'ukuran harus dari slot');
+  assert.match(fn, /config\.slots\[photoIndex\]/, 'ukuran harus dari slot foto pilihan');
   assert.match(fn, /canvas\.width = slot\.width/, 'lebar kanvas = lebar slot');
   assert.match(fn, /canvas\.height = slot\.height/, 'tinggi kanvas = tinggi slot');
 });

@@ -342,11 +342,13 @@ export const completeSession = async (
 export const uploadPhoto = async (
   photoBlob: Blob,
   sessionId: string,
-  filename?: string
+  filename?: string,
+  purpose?: 'print'
 ): Promise<string> => {
   const finalName = filename || `photo-${Date.now()}.png`;
   const formData = new FormData();
   formData.append('photo', photoBlob, finalName);
+  if (purpose === 'print') formData.append('purpose', 'print');
 
   const response = await request<ApiResponse<PhotoData>>({
     method: 'POST',
