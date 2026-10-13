@@ -26,6 +26,7 @@ import {
   submitPaymentEvidence, getPaymentVerificationStatus, fetchPrintingConfig,
   getSessionPaymentStatus, simpanKonfigurasiServer, sumberKonfigurasi
 } from '../services/apiService';
+import { isSelectedFrameAvailable, resolveFrameArtworkUrl, shouldRefreshFrameCatalog, staleFrameSyncWarning } from '../services/frameAssets';
 
 // Global Scale (Now 1.0 since we removed transform scale from index.html)
 const GLOBAL_SCALE = 1.0;
@@ -313,6 +314,7 @@ const normalizeTemplatePrices = (templates: any[]): FrameLayout[] => templates.m
         const canonical = styleConfig && typeof styleConfig === 'object' && !Array.isArray(styleConfig)
           ? styleConfig
           : null;
+        const artworkUrl = resolveFrameArtworkUrl(style, canonical, getApiConfig().baseUrl);
         return canonical
           ? {
               ...style,
@@ -321,12 +323,14 @@ const normalizeTemplatePrices = (templates: any[]): FrameLayout[] => templates.m
               elements: normalizeFrameElements(style, canonical),
               // Admin may overwrite an existing uploaded file at the same URL.
               // Bust the browser cache so the kiosk displays the new artwork.
-              overlayUrl: bustFrameAssetCache(style.overlayUrl ?? style.overlay_url ?? canonical.overlayUrl ?? canonical.overlay_url),
+              overlayUrl: bustFrameAssetCache(artworkUrl),
               slotBorder: style.slotBorder ?? style.slot_border ?? canonical.slotBorder ?? canonical.slot_border,
               slotBorderColor: style.slotBorderColor ?? style.slot_border_color ?? canonical.slotBorderColor ?? canonical.slot_border_color,
               slotBorderWidth: style.slotBorderWidth ?? style.slot_border_width ?? canonical.slotBorderWidth ?? canonical.slot_border_width
             }
-          : style;
+          : artworkUrl
+            ? { ...style, overlayUrl: bustFrameAssetCache(artworkUrl) }
+            : style;
       })
     : layout?.styles;
   const normalizedLayout = normalizedStyles ? { ...layout, styles: normalizedStyles } : layout;
@@ -1519,7 +1523,7 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
         const salinan = bacaTemplatesTersimpan();
         if (salinan.length > 0) {
           setFrames(salinan);
-          setTemplateError(null);
+          setTemplateError(staleFrameSyncWarning());
           console.warn('[PhotoBooth] Template dari backend gagal; memakai salinan terakhir:', message);
           return true;
         }
@@ -1625,11 +1629,12 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
     };
   }, [step, idlePaused, isCalibrating, goToSignage]);
 
-  // Admin updates can happen while the kiosk page stays open. Refresh when
-  // the kiosk is idle; never replace frame data during an active photo flow.
+  // Admin updates can happen while the kiosk page stays open. Refresh the
+  // catalog on LANDING and in the frame editor; selection is preserved below
+  // so an in-progress print is not silently switched to another frame.
   useEffect(() => {
     const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible' && step === 'LANDING') refreshFrames();
+      if (shouldRefreshFrameCatalog(step, document.visibilityState)) void refreshFrames();
     };
     document.addEventListener('visibilitychange', refreshWhenVisible);
     window.addEventListener('focus', refreshWhenVisible);
@@ -1650,9 +1655,10 @@ export const PhotoBooth: React.FC<PhotoBoothProps> = ({ onAdminClick, idlePaused
     const availableStyles = frames.filter(f => f.id === selectedLayoutId).flatMap(f => f.styles);
     if (availableStyles.length === 0) return;
 
-    const currentStyle = selectedFrame ? availableStyles.find(style => style.id === selectedFrame.id) : null;
-    if (!currentStyle || currentStyle !== selectedFrame) {
-        setSelectedFrame(currentStyle || availableStyles[0]);
+    // A refresh updates frame cards immediately, but does not silently swap an
+    // already selected frame (and therefore a pending print) mid-session.
+    if (!isSelectedFrameAvailable(availableStyles, selectedFrame)) {
+        setSelectedFrame(availableStyles[0]);
         setProcessedFrame(null);
         setAreAssetsReady(false);
     }
